@@ -36,7 +36,7 @@ def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     
-    # 1. Grupos
+    # 1. Grupos (Completamente limpio, sin valores por defecto)
     c.execute('''
         CREATE TABLE IF NOT EXISTS grupos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -46,24 +46,11 @@ def init_db():
         )
     ''')
 
-    # Grupo inicial por defecto si no existe
-    c.execute("SELECT COUNT(*) FROM grupos")
-    if c.fetchone()[0] == 0:
-        c.execute('''
-            INSERT INTO grupos (diplomado, grupo, docente)
-            VALUES (?, ?, ?)
-        ''', (
-            "AUTOMATIZACIÓN INDUSTRIAL Y SISTEMAS FOTOVOLTAICOS",
-            "GPO. 2026-I",
-            "MTRO. EN ING. OMAR ALEJANDRO JIMÉNEZ NAVARRO"
-        ))
-    conn.commit()
-
     # 2. Alumnos
     c.execute('''
         CREATE TABLE IF NOT EXISTS alumnos (
             matricula TEXT,
-            grupo_id INTEGER DEFAULT 1,
+            grupo_id INTEGER,
             nombre TEXT NOT NULL,
             carrera TEXT,
             telefono TEXT,
@@ -74,11 +61,11 @@ def init_db():
         )
     ''')
 
-    # 3. Horas
+    # 3. Bitácora de Horas
     c.execute('''
         CREATE TABLE IF NOT EXISTS bitacora_horas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            grupo_id INTEGER DEFAULT 1,
+            grupo_id INTEGER,
             fecha TEXT NOT NULL,
             horas REAL NOT NULL,
             tema TEXT
@@ -88,24 +75,13 @@ def init_db():
     # 4. Asistencias
     c.execute('''
         CREATE TABLE IF NOT EXISTS asistencias (
-            grupo_id INTEGER DEFAULT 1,
+            grupo_id INTEGER,
             fecha TEXT NOT NULL,
             matricula TEXT NOT NULL,
             presente INTEGER DEFAULT 1,
             PRIMARY KEY (grupo_id, fecha, matricula)
         )
     ''')
-    conn.commit()
-
-    # Auto-migración por si la BD ya existía sin grupo_id
-    for tabla in ['alumnos', 'bitacora_horas', 'asistencias']:
-        try:
-            c.execute(f"PRAGMA table_info({tabla})")
-            cols = [info[1] for info in c.fetchall()]
-            if 'grupo_id' not in cols:
-                c.execute(f"ALTER TABLE {tabla} ADD COLUMN grupo_id INTEGER DEFAULT 1")
-        except Exception:
-            pass
 
     conn.commit()
     conn.close()
@@ -125,7 +101,9 @@ def add_grupo(diplomado, grupo, docente):
     c.execute("INSERT INTO grupos (diplomado, grupo, docente) VALUES (?, ?, ?)",
               (diplomado.strip().upper(), grupo.strip().upper(), docente.strip().upper()))
     conn.commit()
+    nuevo_id = c.lastrowid
     conn.close()
+    return nuevo_id
 
 def delete_grupo(grupo_id):
     conn = sqlite3.connect(DB_FILE)
@@ -406,7 +384,6 @@ def generar_excel(grupo_id, con_pagos=False):
 
     ws.row_dimensions[7].height = 12
 
-    # Encabezados
     headers = ["#", "MATRÍCULA", "NOMBRE COMPLETO", "CARRERA / ESPECIALIDAD", "TELÉFONO"]
     if con_pagos:
         headers.extend(["1ER PAGO", "2DO PAGO", "PAGO COMPLETO"])
@@ -428,7 +405,6 @@ def generar_excel(grupo_id, con_pagos=False):
         cell.alignment = Alignment(horizontal="center", vertical="center")
         cell.border = header_border
 
-    # Datos
     body_font = Font(name="Calibri", size=9, color="2D3748")
     zebra_fill = PatternFill(start_color="F7FAFC", end_color="F7FAFC", fill_type="solid")
     white_fill = PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid")
@@ -531,9 +507,27 @@ with col_l2:
 
 st.divider()
 
-# Selector y Gestor de Grupos en Sidebar
+# Consultar grupos registrados
 df_grupos = get_grupos()
 
+# PANTALLA DE INICIO SI NO HAY GRUPOS CREADOS
+if df_grupos.empty:
+    st.info("👋 BIENVENIDO. NO HAY NINGÚN DIPLOMADO O GRUPO REGISTRADO.")
+    st.subheader("➕ CREAR EL PRIMER GRUPO DE DIPLOMADO")
+    with st.form("form_primer_grupo"):
+        nvo_dip = st.text_input("NOMBRE DEL DIPLOMADO").upper()
+        nvo_gpo = st.text_input("GRUPO / CLAVE (EJ. GPO. 2026-I)").upper()
+        nvo_doc = st.text_input("DOCENTE RESPONSABLE").upper()
+        if st.form_submit_button("REGISTRAR Y COMENZAR"):
+            if nvo_dip and nvo_gpo:
+                add_grupo(nvo_dip, nvo_gpo, nvo_doc)
+                st.success("DIPLOMADO REGISTRADO CORRECTAMENTE.")
+                st.rerun()
+            else:
+                st.error("EL NOMBRE DEL DIPLOMADO Y EL GRUPO SON OBLIGATORIOS.")
+    st.stop()
+
+# Si ya hay grupos registrados, se activa la barra lateral
 with st.sidebar:
     st.header("📚 GRUPO ACTIVO")
     opciones_grupos = {
@@ -589,10 +583,10 @@ with st.sidebar:
     )
 
     st.divider()
-    with st.expander("➕ CREAR UN NUEVO GRUPO"):
+    with st.expander("➕ CREAR OTRO GRUPO / DIPLOMADO"):
         with st.form("form_nuevo_grupo"):
             nvo_dip = st.text_input("NOMBRE DEL DIPLOMADO").upper()
-            nvo_gpo = st.text_input("GRUPO / CLAVE (EJ. GPO. 2026-B)").upper()
+            nvo_gpo = st.text_input("GRUPO / CLAVE").upper()
             nvo_doc = st.text_input("DOCENTE RESPONSABLE", value=dip_docente).upper()
             if st.form_submit_button("CREAR GRUPO"):
                 if nvo_dip and nvo_gpo:
@@ -602,15 +596,14 @@ with st.sidebar:
                 else:
                     st.error("NOMBRE Y GRUPO SON REQUERIDOS.")
 
-    if len(df_grupos) > 1:
-        with st.expander("🗑️ ELIMINAR ESTE GRUPO"):
-            st.caption("Esta acción borrará el grupo actual y todos sus alumnos, asistencias y horas.")
-            if st.button("CONFIRMAR Y BORRAR GRUPO ACTIVO"):
-                delete_grupo(grupo_seleccionado_id)
-                st.warning("GRUPO ELIMINADO.")
-                st.rerun()
+    with st.expander("🗑️ ELIMINAR ESTE GRUPO"):
+        st.caption(f"¿Deseas eliminar '{dip_grupo}' y todos sus datos?")
+        if st.button("CONFIRMAR Y BORRAR ESTE GRUPO"):
+            delete_grupo(grupo_seleccionado_id)
+            st.warning("GRUPO ELIMINADO.")
+            st.rerun()
 
-# Pestañas principales
+# Pestañas de trabajo para el grupo seleccionado
 tab_alumnos, tab_asistencia, tab_horas = st.tabs([
     f"📋 ALUMNOS Y PAGOS ({dip_grupo})",
     f"✅ PASE DE LISTA",
