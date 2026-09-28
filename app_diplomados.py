@@ -4,85 +4,140 @@ import sqlite3
 from datetime import date
 import io
 import os
-from PIL import Image
 
-# ReportLab para el PDF
+# ReportLab para PDF
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
-# Configuración general
 st.set_page_config(
     page_title="Control Escolar - Posgrado e Ingeniería UAdeC",
     layout="wide",
     page_icon="🎓"
 )
 
-# Nombres de archivos de logotipos
 PATH_LOGO_UADEC = "logo_uadec.png"
 PATH_LOGO_POSGRADO = "logo_posgrado.png"
-
-# ==========================================
-# 1. BASE DE DATOS LOCAL (PERSISTENCIA SQLITE)
-# ==========================================
 DB_FILE = "diplomados.db"
 
+# ==========================================
+# 1. BASE DE DATOS LOCAL MULTI-GRUPO
+# ==========================================
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # Tabla de Alumnos
+    
+    # Tabla de Grupos
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS grupos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            diplomado TEXT NOT NULL,
+            grupo TEXT NOT NULL,
+            docente TEXT NOT NULL
+        )
+    ''')
+
+    # Tabla de Alumnos vinculada a grupo_id
     c.execute('''
         CREATE TABLE IF NOT EXISTS alumnos (
-            matricula TEXT PRIMARY KEY,
+            matricula TEXT,
+            grupo_id INTEGER,
             nombre TEXT NOT NULL,
             carrera TEXT,
             telefono TEXT,
             pago_1 INTEGER DEFAULT 0,
             pago_2 INTEGER DEFAULT 0,
-            pago_completo INTEGER DEFAULT 0
+            pago_completo INTEGER DEFAULT 0,
+            PRIMARY KEY (matricula, grupo_id)
         )
     ''')
-    # Tabla de Bitácora de Horas
+
+    # Tabla de Horas vinculada a grupo_id
     c.execute('''
         CREATE TABLE IF NOT EXISTS bitacora_horas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            grupo_id INTEGER,
             fecha TEXT NOT NULL,
             horas REAL NOT NULL,
             tema TEXT
         )
     ''')
-    # Tabla de Asistencias
+
+    # Tabla de Asistencias vinculada a grupo_id
     c.execute('''
         CREATE TABLE IF NOT EXISTS asistencias (
+            grupo_id INTEGER,
             fecha TEXT NOT NULL,
             matricula TEXT NOT NULL,
             presente INTEGER DEFAULT 1,
-            PRIMARY KEY (fecha, matricula)
+            PRIMARY KEY (grupo_id, fecha, matricula)
         )
     ''')
+
+    # Crear grupo inicial por defecto si está vacía
+    c.execute("SELECT COUNT(*) FROM grupos")
+    if c.fetchone()[0] == 0:
+        c.execute('''
+            INSERT INTO grupos (diplomado, grupo, docente)
+            VALUES (?, ?, ?)
+        ''', (
+            "AUTOMATIZACIÓN INDUSTRIAL Y SISTEMAS FOTOVOLTAICOS",
+            "GPO. 2026-I",
+            "MTRO. EN ING. OMAR ALEJANDRO JIMÉNEZ NAVARRO"
+        ))
+
     conn.commit()
     conn.close()
 
 init_db()
 
-def get_alumnos_df():
+# Consultas a BD
+def get_grupos():
     conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql_query("SELECT matricula, nombre, carrera, telefono, pago_1, pago_2, pago_completo FROM alumnos ORDER BY nombre ASC", conn)
+    df = pd.read_sql_query("SELECT id, diplomado, grupo, docente FROM grupos ORDER BY id ASC", conn)
+    conn.close()
+    return df
+
+def add_grupo(diplomado, grupo, docente):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("INSERT INTO grupos (diplomado, grupo, docente) VALUES (?, ?, ?)",
+              (diplomado.strip().upper(), grupo.strip().upper(), docente.strip().upper()))
+    conn.commit()
+    conn.close()
+
+def delete_grupo(grupo_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("DELETE FROM grupos WHERE id = ?", (grupo_id,))
+    c.execute("DELETE FROM alumnos WHERE grupo_id = ?", (grupo_id,))
+    c.execute("DELETE FROM bitacora_horas WHERE grupo_id = ?", (grupo_id,))
+    c.execute("DELETE FROM asistencias WHERE grupo_id = ?", (grupo_id,))
+    conn.commit()
+    conn.close()
+
+def get_alumnos_df(grupo_id):
+    conn = sqlite3.connect(DB_FILE)
+    df = pd.read_sql_query(
+        "SELECT matricula, nombre, carrera, telefono, pago_1, pago_2, pago_completo FROM alumnos WHERE grupo_id = ? ORDER BY nombre ASC",
+        conn, params=(grupo_id,)
+    )
     conn.close()
     df["pago_1"] = df["pago_1"].astype(bool)
     df["pago_2"] = df["pago_2"].astype(bool)
     df["pago_completo"] = df["pago_completo"].astype(bool)
     return df
 
-def save_alumno(matricula, nombre, carrera, telefono, p1, p2, p_comp):
+def save_alumno(matricula, grupo_id, nombre, carrera, telefono, p1, p2, p_comp):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''
-        INSERT OR REPLACE INTO alumnos (matricula, nombre, carrera, telefono, pago_1, pago_2, pago_completo)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT OR REPLACE INTO alumnos (matricula, grupo_id, nombre, carrera, telefono, pago_1, pago_2, pago_completo)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ''', (
         str(matricula).strip().upper(),
+        grupo_id,
         str(nombre).strip().upper(),
         str(carrera).strip().upper(),
         str(telefono).strip().upper(),
@@ -93,43 +148,46 @@ def save_alumno(matricula, nombre, carrera, telefono, p1, p2, p_comp):
     conn.commit()
     conn.close()
 
-def delete_alumno(matricula):
+def delete_alumno(matricula, grupo_id):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("DELETE FROM alumnos WHERE matricula = ?", (matricula,))
-    c.execute("DELETE FROM asistencias WHERE matricula = ?", (matricula,))
+    c.execute("DELETE FROM alumnos WHERE matricula = ? AND grupo_id = ?", (matricula, grupo_id))
+    c.execute("DELETE FROM asistencias WHERE matricula = ? AND grupo_id = ?", (matricula, grupo_id))
     conn.commit()
     conn.close()
 
-def save_hora(fecha, horas, tema):
+def save_hora(grupo_id, fecha, horas, tema):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("INSERT INTO bitacora_horas (fecha, horas, tema) VALUES (?, ?, ?)",
-              (str(fecha), float(horas), str(tema).strip().upper()))
+    c.execute("INSERT INTO bitacora_horas (grupo_id, fecha, horas, tema) VALUES (?, ?, ?, ?)",
+              (grupo_id, str(fecha), float(horas), str(tema).strip().upper()))
     conn.commit()
     conn.close()
 
-def get_horas_df():
+def get_horas_df(grupo_id):
     conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql_query("SELECT id, fecha, horas, tema FROM bitacora_horas ORDER BY fecha DESC, id DESC", conn)
+    df = pd.read_sql_query(
+        "SELECT id, fecha, horas, tema FROM bitacora_horas WHERE grupo_id = ? ORDER BY fecha DESC, id DESC",
+        conn, params=(grupo_id,)
+    )
     conn.close()
     return df
 
-def save_asistencia_fecha(fecha, dict_asistencia):
+def save_asistencia_fecha(grupo_id, fecha, dict_asistencia):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     for mat, pres in dict_asistencia.items():
         c.execute('''
-            INSERT OR REPLACE INTO asistencias (fecha, matricula, presente)
-            VALUES (?, ?, ?)
-        ''', (str(fecha), str(mat), 1 if pres else 0))
+            INSERT OR REPLACE INTO asistencias (grupo_id, fecha, matricula, presente)
+            VALUES (?, ?, ?, ?)
+        ''', (grupo_id, str(fecha), str(mat), 1 if pres else 0))
     conn.commit()
     conn.close()
 
-def get_asistencia_fecha(fecha):
+def get_asistencia_fecha(grupo_id, fecha):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("SELECT matricula, presente FROM asistencias WHERE fecha = ?", (str(fecha),))
+    c.execute("SELECT matricula, presente FROM asistencias WHERE grupo_id = ? AND fecha = ?", (grupo_id, str(fecha)))
     res = {row[0]: bool(row[1]) for row in c.fetchall()}
     conn.close()
     return res
@@ -137,20 +195,15 @@ def get_asistencia_fecha(fecha):
 # ==========================================
 # 2. GENERADORES DE ARCHIVOS (PDF Y EXCEL)
 # ==========================================
-def generar_reporte_pdf(nombre_dip, grupo, docente):
+def generar_reporte_pdf(grupo_id, nombre_dip, grupo, docente):
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
-        buffer,
-        pagesize=letter,
-        rightMargin=36,
-        leftMargin=36,
-        topMargin=36,
-        bottomMargin=36
+        buffer, pagesize=letter,
+        rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36
     )
     story = []
     styles = getSampleStyleSheet()
 
-    # Encabezado institucional con logos duales
     logo_izq = ""
     logo_der = ""
     if os.path.exists(PATH_LOGO_UADEC):
@@ -175,7 +228,6 @@ def generar_reporte_pdf(nombre_dip, grupo, docente):
     story.append(t_header)
     story.append(Spacer(1, 10))
 
-    # Datos generales
     meta_style = ParagraphStyle('Meta', parent=styles['Normal'], fontSize=8.5, leading=12)
     meta_data = [
         [
@@ -198,7 +250,6 @@ def generar_reporte_pdf(nombre_dip, grupo, docente):
     story.append(t_meta)
     story.append(Spacer(1, 15))
 
-    # Tabla de Alumnos (SOLO DATOS ESCOLARES, NADA DE PAGOS NI HORAS)
     cell_head = ParagraphStyle('CH', parent=styles['Normal'], fontSize=8.5, fontName='Helvetica-Bold', textColor=colors.whitesmoke, alignment=1)
     cell_body = ParagraphStyle('CB', parent=styles['Normal'], fontSize=8, leading=10)
 
@@ -210,7 +261,7 @@ def generar_reporte_pdf(nombre_dip, grupo, docente):
         Paragraph("TELÉFONO", cell_head)
     ]]
 
-    df_al = get_alumnos_df()
+    df_al = get_alumnos_df(grupo_id)
     for idx, row in df_al.iterrows():
         data.append([
             Paragraph(str(idx + 1), cell_body),
@@ -236,16 +287,14 @@ def generar_reporte_pdf(nombre_dip, grupo, docente):
     buffer.seek(0)
     return buffer
 
-def generar_excel(con_pagos=False):
+def generar_excel(grupo_id, con_pagos=False):
     output = io.BytesIO()
-    df = get_alumnos_df()
+    df = get_alumnos_df(grupo_id)
     
     if not con_pagos:
-        # Solo escolar
         df_export = df[["matricula", "nombre", "carrera", "telefono"]].copy()
         df_export.columns = ["MATRÍCULA", "NOMBRE COMPLETO", "CARRERA", "TELÉFONO"]
     else:
-        # Completo con pagos
         df_export = df.copy()
         df_export["pago_1"] = df_export["pago_1"].apply(lambda x: "PAGADO" if x else "PENDIENTE")
         df_export["pago_2"] = df_export["pago_2"].apply(lambda x: "PAGADO" if x else "PENDIENTE")
@@ -254,10 +303,8 @@ def generar_excel(con_pagos=False):
 
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df_export.to_excel(writer, index=False, sheet_name="ALUMNOS")
-        
-        # Si es con pagos, agregamos también una pestaña de horas impartidas
         if con_pagos:
-            df_h = get_horas_df()
+            df_h = get_horas_df(grupo_id)
             if not df_h.empty:
                 df_h_exp = df_h[["fecha", "horas", "tema"]].copy()
                 df_h_exp.columns = ["FECHA", "HORAS IMPARTIDAS", "TEMA / ACTIVIDAD"]
@@ -267,11 +314,9 @@ def generar_excel(con_pagos=False):
     return output
 
 # ==========================================
-# 3. INTERFAZ DE USUARIO (STREAMLIT)
+# 3. INTERFAZ DE USUARIO
 # ==========================================
-# Encabezado visual con logos
 col_l1, col_t, col_l2 = st.columns([1, 4, 1])
-
 with col_l1:
     if os.path.exists(PATH_LOGO_UADEC):
         st.image(PATH_LOGO_UADEC, use_container_width=True)
@@ -290,22 +335,38 @@ with col_l2:
 
 st.divider()
 
-# Barra lateral con Metadatos y Descargas
-with st.sidebar:
-    st.header("⚙️ CONFIGURACIÓN")
-    dip_nombre = st.text_input("NOMBRE DEL DIPLOMADO", value="AUTOMATIZACIÓN INDUSTRIAL Y SISTEMAS FOTOVOLTAICOS").upper()
-    dip_grupo = st.text_input("GRUPO / GENERACIÓN", value="GPO. 2026-I").upper()
-    dip_docente = st.text_input("DOCENTE RESPONSABLE", value="MTRO. EN ING. OMAR ALEJANDRO JIMÉNEZ NAVARRO").upper()
+# Selector y Gestor de Grupos en Sidebar
+df_grupos = get_grupos()
 
-    df_horas_tot = get_horas_df()
+with st.sidebar:
+    st.header("📚 GRUPO ACTIVO")
+    opciones_grupos = {
+        row["id"]: f"{row['grupo']} - {row['diplomado']}"
+        for _, row in df_grupos.iterrows()
+    }
+
+    grupo_seleccionado_id = st.selectbox(
+        "SELECCIONA EL DIPLOMADO / GRUPO",
+        options=list(opciones_grupos.keys()),
+        format_func=lambda x: opciones_grupos[x]
+    )
+
+    info_grupo = df_grupos[df_grupos["id"] == grupo_seleccionado_id].iloc[0]
+    dip_nombre = info_grupo["diplomado"]
+    dip_grupo = info_grupo["grupo"]
+    dip_docente = info_grupo["docente"]
+
+    st.info(f"**Diplomado:** {dip_nombre}\n\n**Grupo:** {dip_grupo}\n\n**Docente:** {dip_docente}")
+
+    # Horas acumuladas de este grupo específico
+    df_horas_tot = get_horas_df(grupo_seleccionado_id)
     tot_h = df_horas_tot["horas"].sum() if not df_horas_tot.empty else 0.0
     st.metric("HORAS ACUMULADAS", f"{tot_h:.1f} HRS")
 
     st.divider()
     st.subheader("📥 DESCARGAS Y REPORTES")
 
-    # 1. Botón PDF
-    pdf_bytes = generar_reporte_pdf(dip_nombre, dip_grupo, dip_docente)
+    pdf_bytes = generar_reporte_pdf(grupo_seleccionado_id, dip_nombre, dip_grupo, dip_docente)
     st.download_button(
         label="📄 DESCARGAR PDF OFICIAL (SIN PAGOS)",
         data=pdf_bytes,
@@ -314,8 +375,7 @@ with st.sidebar:
         use_container_width=True
     )
 
-    # 2. Botón Excel SIN PAGOS
-    excel_sin = generar_excel(con_pagos=False)
+    excel_sin = generar_excel(grupo_seleccionado_id, con_pagos=False)
     st.download_button(
         label="📊 DESCARGAR EXCEL (SIN PAGOS)",
         data=excel_sin,
@@ -324,30 +384,50 @@ with st.sidebar:
         use_container_width=True
     )
 
-    # 3. Botón Excel CON PAGOS
-    excel_con = generar_excel(con_pagos=True)
+    excel_con = generar_excel(grupo_seleccionado_id, con_pagos=True)
     st.download_button(
         label="💰 DESCARGAR EXCEL (CON PAGOS Y HORAS)",
         data=excel_con,
-        file_name=f"CONTROL_INTERNO_{dip_grupo.replace(' ', '_')}_PAGOS.xlsx",
+        file_name=f"CONTROL_{dip_grupo.replace(' ', '_')}_PAGOS.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True
     )
 
-# Pestañas principales
+    st.divider()
+    with st.expander("➕ CREAR UN NUEVO GRUPO"):
+        with st.form("form_nuevo_grupo"):
+            nvo_dip = st.text_input("NOMBRE DEL DIPLOMADO").upper()
+            nvo_gpo = st.text_input("GRUPO / CLAVE (EJ. GPO. 2026-B)").upper()
+            nvo_doc = st.text_input("DOCENTE RESPONSABLE", value=dip_docente).upper()
+            if st.form_submit_button("CREAR GRUPO"):
+                if nvo_dip and nvo_gpo:
+                    add_grupo(nvo_dip, nvo_gpo, nvo_doc)
+                    st.success("GRUPO CREADO EXITOSAMENTE.")
+                    st.rerun()
+                else:
+                    st.error("NOMBRE Y GRUPO SON REQUERIDOS.")
+
+    if len(df_grupos) > 1:
+        with st.expander("🗑️ ELIMINAR ESTE GRUPO"):
+            st.caption("Esta acción borrará el grupo actual y todos sus alumnos, asistencias y horas.")
+            if st.button("CONFIRMAR Y BORRAR GRUPO ACTIVO"):
+                delete_grupo(grupo_seleccionado_id)
+                st.warning("GRUPO ELIMINADO.")
+                st.rerun()
+
+# Pestañas principales de trabajo para el grupo seleccionado
 tab_alumnos, tab_asistencia, tab_horas = st.tabs([
-    "📋 ALUMNOS Y PAGOS",
-    "✅ PASE DE LISTA",
-    "⏱️ BITÁCORA DE HORAS"
+    f"📋 ALUMNOS Y PAGOS ({dip_grupo})",
+    f"✅ PASE DE LISTA",
+    f"⏱️ BITÁCORA DE HORAS"
 ])
 
-# --- TAB 1: ALUMNOS Y CONTROL FINANCIERO ---
+# --- TAB 1: ALUMNOS Y PAGOS ---
 with tab_alumnos:
-    df_al = get_alumnos_df()
+    df_al = get_alumnos_df(grupo_seleccionado_id)
 
-    st.subheader("LISTADO DE ESTUDIANTES")
+    st.subheader(f"LISTADO DE ESTUDIANTES - {dip_grupo}")
     if not df_al.empty:
-        # Formateo para editor
         df_display = df_al.rename(columns={
             "matricula": "MATRÍCULA",
             "nombre": "NOMBRE",
@@ -373,7 +453,7 @@ with tab_alumnos:
             use_container_width=True,
             column_config=col_cfg,
             num_rows="fixed",
-            key="editor_grid"
+            key=f"editor_{grupo_seleccionado_id}"
         )
 
         c_save, c_del = st.columns([2, 2])
@@ -381,6 +461,7 @@ with tab_alumnos:
             for _, r in edited_data.iterrows():
                 save_alumno(
                     r["MATRÍCULA"],
+                    grupo_seleccionado_id,
                     r["NOMBRE"],
                     r["CARRERA"],
                     r["TELÉFONO"],
@@ -388,22 +469,22 @@ with tab_alumnos:
                     r["2DO PAGO"],
                     r["PAGO COMPLETO"]
                 )
-            st.success("DATOS ACTUALIZADOS Y ALMACENADOS EN DISCO.")
+            st.success("DATOS GUARDADOS EN DISCO.")
             st.rerun()
 
         with c_del:
             with st.popover("🗑️ ELIMINAR UN ALUMNO"):
-                mat_del = st.selectbox("SELECCIONA MATRÍCULA A ELIMINAR", df_al["matricula"].tolist())
+                mat_del = st.selectbox("MATRÍCULA A ELIMINAR", df_al["matricula"].tolist())
                 if st.button("CONFIRMAR ELIMINACIÓN"):
-                    delete_alumno(mat_del)
+                    delete_alumno(mat_del, grupo_seleccionado_id)
                     st.warning(f"ALUMNO {mat_del} ELIMINADO.")
                     st.rerun()
     else:
-        st.info("NO HAY ALUMNOS REGISTRADOS EN LA BASE DE DATOS.")
+        st.info("NO HAY ALUMNOS EN ESTE GRUPO AÚN.")
 
     st.divider()
 
-    with st.expander("➕ REGISTRAR NUEVO ALUMNO", expanded=df_al.empty):
+    with st.expander("➕ REGISTRAR NUEVO ALUMNO A ESTE GRUPO", expanded=df_al.empty):
         with st.form("form_nuevo_alumno"):
             c1, c2 = st.columns(2)
             n_mat = c1.text_input("MATRÍCULA").upper()
@@ -418,23 +499,23 @@ with tab_alumnos:
             p2 = cp2.checkbox("2DO PAGO")
             p_comp = cp3.checkbox("PAGO COMPLETO")
 
-            if st.form_submit_button("GUARDAR EN BASE DE DATOS"):
+            if st.form_submit_button("GUARDAR ALUMNO"):
                 if n_mat and n_nom:
-                    save_alumno(n_mat, n_nom, n_car, n_tel, p1, p2, p_comp)
-                    st.success(f"ALUMNO {n_nom} REGISTRADO CORRECTAMENTE.")
+                    save_alumno(n_mat, grupo_seleccionado_id, n_nom, n_car, n_tel, p1, p2, p_comp)
+                    st.success(f"ALUMNO {n_nom} REGISTRADO EN {dip_grupo}.")
                     st.rerun()
                 else:
                     st.error("LA MATRÍCULA Y EL NOMBRE SON OBLIGATORIOS.")
 
 # --- TAB 2: PASE DE LISTA ---
 with tab_asistencia:
-    st.subheader("PASE DE LISTA DIARIO")
+    st.subheader(f"PASE DE LISTA - {dip_grupo}")
     col_fa, _ = st.columns([1, 2])
     f_asis = col_fa.date_input("FECHA DE LA SESIÓN", value=date.today())
     str_f = str(f_asis)
 
-    asis_guardadas = get_asistencia_fecha(str_f)
-    df_al_asis = get_alumnos_df()
+    asis_guardadas = get_asistencia_fecha(grupo_seleccionado_id, str_f)
+    df_al_asis = get_alumnos_df(grupo_seleccionado_id)
 
     if not df_al_asis.empty:
         with st.form("form_pase_lista"):
@@ -444,39 +525,39 @@ with tab_asistencia:
                 val_previo = asis_guardadas.get(al["matricula"], True)
                 col_n, col_c = st.columns([3, 1])
                 col_n.write(f"**{al['nombre']}** ({al['matricula']})")
-                nuevos_estados[al["matricula"]] = col_c.checkbox("PRESENTE", value=val_previo, key=f"att_{str_f}_{al['matricula']}")
+                nuevos_estados[al["matricula"]] = col_c.checkbox("PRESENTE", value=val_previo, key=f"att_{grupo_seleccionado_id}_{str_f}_{al['matricula']}")
 
             if st.form_submit_button("💾 GUARDAR PASE DE LISTA"):
-                save_asistencia_fecha(str_f, nuevos_estados)
-                st.success(f"ASISTENCIAS DEL DÍA {str_f} GUARDADAS EN BASE DE DATOS.")
+                save_asistencia_fecha(grupo_seleccionado_id, str_f, nuevos_estados)
+                st.success(f"ASISTENCIAS DEL {str_f} GUARDADAS.")
     else:
-        st.info("PRIMERO REGISTRE ALUMNOS EN LA PESTAÑA ANTERIOR.")
+        st.info("ESTE GRUPO NO TIENE ALUMNOS REGISTRADOS TODAVÍA.")
 
 # --- TAB 3: CONTROL DE HORAS ---
 with tab_horas:
-    st.subheader("BITÁCORA DOCENTE DE HORAS")
+    st.subheader(f"BITÁCORA DOCENTE DE HORAS - {dip_grupo}")
     col_h1, col_h2 = st.columns([1, 1])
 
     with col_h1:
         with st.form("form_nueva_hora"):
             st.write("**REGISTRAR SESIÓN IMPARTIDA**")
-            f_h = st.date_input("FECHA", value=date.today(), key="f_hora")
+            f_h = st.date_input("FECHA", value=date.today(), key=f"f_hora_{grupo_seleccionado_id}")
             n_hrs = st.number_input("HORAS DADAS", min_value=0.5, max_value=12.0, value=2.0, step=0.5)
             n_tema = st.text_input("TEMA / CONTENIDO ABORDADO").upper()
 
             if st.form_submit_button("REGISTRAR HORAS"):
                 if n_tema:
-                    save_hora(f_h, n_hrs, n_tema)
+                    save_hora(grupo_seleccionado_id, f_h, n_hrs, n_tema)
                     st.success("HORAS REGISTRADAS EXITOSAMENTE.")
                     st.rerun()
                 else:
                     st.error("INGRESE EL TEMA DE LA CLASE.")
 
     with col_h2:
-        st.write("**HISTORIAL REGISTRADO**")
-        df_hist = get_horas_df()
+        st.write("**HISTORIAL DEL GRUPO**")
+        df_hist = get_horas_df(grupo_seleccionado_id)
         if not df_hist.empty:
             df_hist_view = df_hist.rename(columns={"fecha": "FECHA", "horas": "HORAS", "tema": "TEMA"})
             st.dataframe(df_hist_view[["FECHA", "HORAS", "TEMA"]], use_container_width=True)
         else:
-            st.caption("AÚN NO HAY HORAS REGISTRADAS.")
+            st.caption("AÚN NO HAY HORAS REGISTRADAS EN ESTE GRUPO.")
